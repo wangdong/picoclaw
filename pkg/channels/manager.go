@@ -272,6 +272,12 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 				continue
 			}
 
+			// Internal control messages are for channel-side state management.
+			// Only Discord currently consumes them (typing indicator lifecycle).
+			if msg.Control && msg.Channel != "discord" {
+				continue
+			}
+
 			if err := channel.Send(ctx, msg); err != nil {
 				logger.ErrorCF("channels", "Error sending message to channel", map[string]interface{}{
 					"channel": msg.Channel,

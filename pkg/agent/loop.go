@@ -47,6 +47,7 @@ type AgentLoop struct {
 // processOptions configures how a message is processed
 type processOptions struct {
 	SessionKey      string // Session identifier for history/context
+	RequestID       string // Per-request identifier for channel UX state (e.g. typing)
 	Channel         string // Target channel for tool execution
 	ChatID          string // Target chat ID for tool execution
 	UserMessage     string // User message content (may include prefix)
@@ -180,12 +181,35 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				if !alreadySent {
+					requestID := ""
+					if msg.Metadata != nil {
+						requestID = msg.Metadata["request_id"]
+					}
+
 					al.bus.PublishOutbound(bus.OutboundMessage{
 						Channel:    msg.Channel,
 						ChatID:     msg.ChatID,
 						Content:    response,
 						SessionKey: msg.SessionKey,
+						RequestID:  requestID,
 						IsFinal:    true,
+					})
+				} else {
+					// Message tool may send user-visible text directly and suppress final response.
+					// Publish an internal final signal so channels (e.g. Discord typing state)
+					// can close request-scoped UX state without sending duplicate text.
+					requestID := ""
+					if msg.Metadata != nil {
+						requestID = msg.Metadata["request_id"]
+					}
+					al.bus.PublishOutbound(bus.OutboundMessage{
+						Channel:    msg.Channel,
+						ChatID:     msg.ChatID,
+						Content:    "",
+						SessionKey: msg.SessionKey,
+						RequestID:  requestID,
+						IsFinal:    true,
+						Control:    true,
 					})
 				}
 			}
@@ -269,7 +293,13 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 
 	// Process as user message
 	return al.runAgentLoop(ctx, processOptions{
-		SessionKey:      msg.SessionKey,
+		SessionKey: msg.SessionKey,
+		RequestID: func() string {
+			if msg.Metadata == nil {
+				return ""
+			}
+			return msg.Metadata["request_id"]
+		}(),
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
 		UserMessage:     msg.Content,
@@ -397,6 +427,7 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 			ChatID:     opts.ChatID,
 			Content:    finalContent,
 			SessionKey: opts.SessionKey,
+			RequestID:  opts.RequestID,
 			IsFinal:    true,
 		})
 	}
@@ -546,6 +577,7 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 					ChatID:     opts.ChatID,
 					Content:    toolResult.ForUser,
 					SessionKey: opts.SessionKey,
+					RequestID:  opts.RequestID,
 					IsFinal:    false,
 				})
 				logger.DebugCF("agent", "Sent tool result to user",

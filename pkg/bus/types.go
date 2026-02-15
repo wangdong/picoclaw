@@ -15,7 +15,9 @@ type OutboundMessage struct {
 	ChatID     string `json:"chat_id"`
 	Content    string `json:"content"`
 	SessionKey string `json:"session_key,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
 	IsFinal    bool   `json:"is_final,omitempty"`
+	Control    bool   `json:"control,omitempty"` // internal signal message, not user-visible text
 }
 
 type MessageHandler func(InboundMessage) error

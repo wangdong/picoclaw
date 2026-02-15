@@ -113,12 +113,16 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 		return fmt.Errorf("channel ID is empty")
 	}
 	defer func() {
-		// Stop typing only when the final response of this session is sent.
-		// Fallback: if session key is missing, stop to avoid leaked typing status.
-		if msg.IsFinal || msg.SessionKey == "" {
-			c.stopTyping(msg.SessionKey, channelID)
+		// Stop typing only when the final response of this request is sent.
+		// This avoids non-session/system messages stopping another active request.
+		if msg.IsFinal {
+			c.stopTyping(msg.RequestID)
 		}
 	}()
+
+	if msg.Control {
+		return nil
+	}
 
 	message := msg.Content
 
@@ -250,6 +254,7 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 
 	metadata := map[string]string{
 		"message_id":   m.ID,
+		"request_id":   m.ID,
 		"user_id":      senderID,
 		"username":     m.Author.Username,
 		"display_name": senderName,
@@ -258,20 +263,22 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"is_dm":        fmt.Sprintf("%t", m.GuildID == ""),
 	}
 
-	sessionKey := fmt.Sprintf("%s:%s", c.Name(), m.ChannelID)
-	c.startTyping(sessionKey, m.ChannelID)
+	c.startTyping(m.ID, m.ChannelID)
 	c.HandleMessage(senderID, m.ChannelID, content, mediaPaths, metadata)
 }
 
-func (c *DiscordChannel) typingKey(sessionKey, channelID string) string {
-	if sessionKey != "" {
-		return sessionKey
+func (c *DiscordChannel) typingKey(requestID string) string {
+	if requestID == "" {
+		return ""
 	}
-	return fmt.Sprintf("%s:%s", c.Name(), channelID)
+	return fmt.Sprintf("%s:req:%s", c.Name(), requestID)
 }
 
-func (c *DiscordChannel) startTyping(sessionKey, channelID string) {
-	key := c.typingKey(sessionKey, channelID)
+func (c *DiscordChannel) startTyping(requestID, channelID string) {
+	key := c.typingKey(requestID)
+	if key == "" {
+		return
+	}
 
 	c.typingMu.Lock()
 	if _, exists := c.typingTasks[key]; exists {
@@ -321,8 +328,11 @@ func (c *DiscordChannel) startTyping(sessionKey, channelID string) {
 	}()
 }
 
-func (c *DiscordChannel) stopTyping(sessionKey, channelID string) {
-	key := c.typingKey(sessionKey, channelID)
+func (c *DiscordChannel) stopTyping(requestID string) {
+	key := c.typingKey(requestID)
+	if key == "" {
+		return
+	}
 
 	c.typingMu.Lock()
 	task, exists := c.typingTasks[key]
