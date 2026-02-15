@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test
+.PHONY: all build install uninstall clean help test service-install service-uninstall service-start service-stop service-restart service-status service-logs
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -139,6 +139,62 @@ deps:
 ## run: Build and run picoclaw
 run: build
 	@$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
+
+## service-install: Install and start macOS launchd service for gateway
+service-install: install
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh install --binary "$(INSTALL_BIN_DIR)/$(BINARY_NAME)"
+else
+	@echo "service-install is only supported on macOS"
+endif
+
+## service-uninstall: Remove macOS launchd service for gateway
+service-uninstall:
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh uninstall
+else
+	@echo "service-uninstall is only supported on macOS"
+endif
+
+## service-start: Start macOS launchd service for gateway
+service-start:
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh start
+else
+	@echo "service-start is only supported on macOS"
+endif
+
+## service-stop: Stop macOS launchd service for gateway
+service-stop:
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh stop
+else
+	@echo "service-stop is only supported on macOS"
+endif
+
+## service-restart: Restart macOS launchd service for gateway
+service-restart:
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh restart
+else
+	@echo "service-restart is only supported on macOS"
+endif
+
+## service-status: Show macOS launchd service status
+service-status:
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh status
+else
+	@echo "service-status is only supported on macOS"
+endif
+
+## service-logs: Tail macOS launchd service logs
+service-logs:
+ifeq ($(UNAME_S),Darwin)
+	@./scripts/macos-gateway-service.sh logs
+else
+	@echo "service-logs is only supported on macOS"
+endif
 
 ## help: Show this help message
 help:
