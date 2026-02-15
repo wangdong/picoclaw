@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -17,6 +18,8 @@ import (
 const (
 	transcriptionTimeout = 30 * time.Second
 	sendTimeout          = 10 * time.Second
+	typingInterval       = 8 * time.Second
+	typingMaxDuration    = 5 * time.Minute
 )
 
 type DiscordChannel struct {
@@ -25,6 +28,14 @@ type DiscordChannel struct {
 	config      config.DiscordConfig
 	transcriber *voice.GroqTranscriber
 	ctx         context.Context
+	typingMu    sync.Mutex
+	typingTasks map[string]typingTask
+	typingSeq   uint64
+}
+
+type typingTask struct {
+	id     uint64
+	cancel context.CancelFunc
 }
 
 func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordChannel, error) {
@@ -41,6 +52,7 @@ func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordC
 		config:      cfg,
 		transcriber: nil,
 		ctx:         context.Background(),
+		typingTasks: make(map[string]typingTask),
 	}, nil
 }
 
@@ -82,6 +94,7 @@ func (c *DiscordChannel) Start(ctx context.Context) error {
 func (c *DiscordChannel) Stop(ctx context.Context) error {
 	logger.InfoC("discord", "Stopping Discord bot")
 	c.setRunning(false)
+	c.stopAllTyping()
 
 	if err := c.session.Close(); err != nil {
 		return fmt.Errorf("failed to close discord session: %w", err)
@@ -99,6 +112,13 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 	if channelID == "" {
 		return fmt.Errorf("channel ID is empty")
 	}
+	defer func() {
+		// Stop typing only when the final response of this session is sent.
+		// Fallback: if session key is missing, stop to avoid leaked typing status.
+		if msg.IsFinal || msg.SessionKey == "" {
+			c.stopTyping(msg.SessionKey, channelID)
+		}
+	}()
 
 	message := msg.Content
 
@@ -238,7 +258,105 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"is_dm":        fmt.Sprintf("%t", m.GuildID == ""),
 	}
 
+	sessionKey := fmt.Sprintf("%s:%s", c.Name(), m.ChannelID)
+	c.startTyping(sessionKey, m.ChannelID)
 	c.HandleMessage(senderID, m.ChannelID, content, mediaPaths, metadata)
+}
+
+func (c *DiscordChannel) typingKey(sessionKey, channelID string) string {
+	if sessionKey != "" {
+		return sessionKey
+	}
+	return fmt.Sprintf("%s:%s", c.Name(), channelID)
+}
+
+func (c *DiscordChannel) startTyping(sessionKey, channelID string) {
+	key := c.typingKey(sessionKey, channelID)
+
+	c.typingMu.Lock()
+	if _, exists := c.typingTasks[key]; exists {
+		c.typingMu.Unlock()
+		return
+	}
+
+	typingCtx, cancel := context.WithCancel(context.Background())
+	c.typingSeq++
+	taskID := c.typingSeq
+	c.typingTasks[key] = typingTask{id: taskID, cancel: cancel}
+	c.typingMu.Unlock()
+
+	go func() {
+		defer c.cleanupTypingTask(key, taskID)
+
+		sendTyping := func() {
+			if err := c.session.ChannelTyping(channelID); err != nil {
+				logger.DebugCF("discord", "Failed to send typing indicator", map[string]any{
+					"channel_id": channelID,
+					"error":      err.Error(),
+				})
+			}
+		}
+
+		sendTyping()
+
+		ticker := time.NewTicker(typingInterval)
+		defer ticker.Stop()
+
+		timeout := time.NewTimer(typingMaxDuration)
+		defer timeout.Stop()
+
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-timeout.C:
+				logger.DebugCF("discord", "Typing indicator auto-stopped on timeout", map[string]any{
+					"session_key": key,
+				})
+				return
+			case <-ticker.C:
+				sendTyping()
+			}
+		}
+	}()
+}
+
+func (c *DiscordChannel) stopTyping(sessionKey, channelID string) {
+	key := c.typingKey(sessionKey, channelID)
+
+	c.typingMu.Lock()
+	task, exists := c.typingTasks[key]
+	if exists {
+		delete(c.typingTasks, key)
+	}
+	c.typingMu.Unlock()
+
+	if exists {
+		task.cancel()
+	}
+}
+
+func (c *DiscordChannel) cleanupTypingTask(key string, taskID uint64) {
+	c.typingMu.Lock()
+	current, exists := c.typingTasks[key]
+	if exists && current.id == taskID {
+		delete(c.typingTasks, key)
+	}
+	c.typingMu.Unlock()
+}
+
+func (c *DiscordChannel) stopAllTyping() {
+	c.typingMu.Lock()
+	cancellers := make([]context.CancelFunc, 0, len(c.typingTasks))
+	for key, task := range c.typingTasks {
+		cancellers = append(cancellers, task.cancel)
+		delete(c.typingTasks, key)
+	}
+	c.typingMu.Unlock()
+
+	for _, cancel := range cancellers {
+		cancel()
+	}
 }
 
 func (c *DiscordChannel) downloadAttachment(url, filename string) string {

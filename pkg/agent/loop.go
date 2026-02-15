@@ -91,9 +91,11 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 	messageTool := tools.NewMessageTool()
 	messageTool.SetSendCallback(func(channel, chatID, content string) error {
 		msgBus.PublishOutbound(bus.OutboundMessage{
-			Channel: channel,
-			ChatID:  chatID,
-			Content: content,
+			Channel:    channel,
+			ChatID:     chatID,
+			Content:    content,
+			SessionKey: fmt.Sprintf("%s:%s", channel, chatID),
+			IsFinal:    true,
 		})
 		return nil
 	})
@@ -179,9 +181,11 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 
 				if !alreadySent {
 					al.bus.PublishOutbound(bus.OutboundMessage{
-						Channel: msg.Channel,
-						ChatID:  msg.ChatID,
-						Content: response,
+						Channel:    msg.Channel,
+						ChatID:     msg.ChatID,
+						Content:    response,
+						SessionKey: msg.SessionKey,
+						IsFinal:    true,
 					})
 				}
 			}
@@ -389,9 +393,11 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 	// 8. Optional: send response via bus
 	if opts.SendResponse {
 		al.bus.PublishOutbound(bus.OutboundMessage{
-			Channel: opts.Channel,
-			ChatID:  opts.ChatID,
-			Content: finalContent,
+			Channel:    opts.Channel,
+			ChatID:     opts.ChatID,
+			Content:    finalContent,
+			SessionKey: opts.SessionKey,
+			IsFinal:    true,
 		})
 	}
 
@@ -536,9 +542,11 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 			// Send ForUser content to user immediately if not Silent
 			if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
 				al.bus.PublishOutbound(bus.OutboundMessage{
-					Channel: opts.Channel,
-					ChatID:  opts.ChatID,
-					Content: toolResult.ForUser,
+					Channel:    opts.Channel,
+					ChatID:     opts.ChatID,
+					Content:    toolResult.ForUser,
+					SessionKey: opts.SessionKey,
+					IsFinal:    false,
 				})
 				logger.DebugCF("agent", "Sent tool result to user",
 					map[string]interface{}{
